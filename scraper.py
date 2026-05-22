@@ -12,6 +12,7 @@ import time
 import json
 import os
 import re
+import sys
 import logging
 
 SPREADSHEET_ID = "1NEZbf37cLnq9Asf9aA76cy4Wjtn7VTLaUQ85oE-ksr0"
@@ -30,7 +31,7 @@ HEADERS = {
     )
 }
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout, force=True)
 log = logging.getLogger(__name__)
 
 def conectar_sheets():
