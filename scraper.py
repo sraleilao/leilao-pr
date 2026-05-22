@@ -255,4 +255,4 @@ def main():
 
         time.sleep(1)
 
-    log.info(f"\n📊 Total encontrad
+    log.info(f"Total encontrado: {len(todos_resultados)} imoveis")
