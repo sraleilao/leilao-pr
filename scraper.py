@@ -11,7 +11,7 @@ from datetime import datetime
 print("Iniciando robo de leiloes...", flush=True)
 
 SPREADSHEET_ID = "1NEZbf37cLnq9Asf9aA76cy4Wjtn7VTLaUQ85oE-ksr0"
-ABA_LEILOEIROS = "Pagina1"
+ABA_LEILOEIROS = "Leiloeiros1"
 ABA_RESULTADOS = "Resultados"
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
