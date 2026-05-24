@@ -8,15 +8,18 @@ on:
       aba:
         description: 'Qual aba processar?'
         required: true
-        default: 'Leiloeiros1'
+        default: 'todas'
         type: choice
         options:
+          - todas
           - Leiloeiros1
           - Leiloeiros2
           - Leiloeiros3
+          - relatorio
 
 jobs:
-  buscar-leiloes:
+  bloco1:
+    if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros1' || github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 110
     steps:
@@ -25,8 +28,58 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - name: Rodar robô
+      - name: Bloco 1
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          ABA_LEILOEIROS: ${{ github.event.inputs.aba || 'Leiloeiros1' }}
+          ABA_LEILOEIROS: Leiloeiros1
         run: python scraper.py
+
+  bloco2:
+    if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros2' || github.event_name == 'schedule' }}
+    needs: bloco1
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Bloco 2
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          ABA_LEILOEIROS: Leiloeiros2
+        run: python scraper.py
+
+  bloco3:
+    if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros3' || github.event_name == 'schedule' }}
+    needs: bloco2
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Bloco 3
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          ABA_LEILOEIROS: Leiloeiros3
+        run: python scraper.py
+
+  relatorio:
+    if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'relatorio' || github.event_name == 'schedule') }}
+    needs: bloco3
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Gerar Top 10
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python relatorio.py
