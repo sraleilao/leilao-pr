@@ -8,10 +8,10 @@ on:
       aba:
         description: 'Qual aba processar?'
         required: true
-        default: 'Pagina1'
+        default: 'Leiloeiros1'
         type: choice
         options:
-          - Pagina1
+          - Leiloeiros1
           - Leiloeiros2
           - Leiloeiros3
 
@@ -28,5 +28,5 @@ jobs:
       - name: Rodar robô
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          ABA_LEILOEIROS: ${{ github.event.inputs.aba || 'Pagina1' }}
+          ABA_LEILOEIROS: ${{ github.event.inputs.aba || 'Leiloeiros1' }}
         run: python scraper.py
