@@ -80,10 +80,12 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - run: pip install playwright==1.43.0
-      - run: sudo apt-get install -y libasound2t64
-      - run: python -m playwright install chromium
-      - run: python -m playwright install-deps chromium
+      - name: Instalar dependencias do Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
+      - name: Instalar Chromium
+        run: python -m playwright install chromium
       - name: Playwright
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
