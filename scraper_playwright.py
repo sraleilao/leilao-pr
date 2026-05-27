@@ -10,7 +10,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 print("Iniciando Playwright...", flush=True)
 
 SPREADSHEET_ID = "1NEZbf37cLnq9Asf9aA76cy4Wjtn7VTLaUQ85oE-ksr0"
-ABA_LEILOEIROS = os.environ.get("ABA_LEILOEIROS", "Leiloeiros1")
 ABA_RESULTADOS = "Resultados"
 ABA_CONFIG     = "Configuracoes"
 
@@ -33,7 +32,8 @@ PALAVRAS_NAO_IMOVEL = [
 
 PALAVRAS_LINK_IGNORAR = [
     "edital","facebook","twitter","instagram","whatsapp",
-    "javascript:","mailto:","tel:","#","linkedin","youtube"
+    "javascript:","mailto:","tel:","#","linkedin","youtube",
+    "leiloes-realizados","encerrado"
 ]
 
 TERMOS_BUSCA_TEMPLATE = [
@@ -60,6 +60,8 @@ NOMES_ESTADOS = {
     "PI":"piaui","RN":"rio-grande-do-norte","AL":"alagoas","SE":"sergipe",
     "RO":"rondonia","AC":"acre","AP":"amapa","RR":"roraima","TO":"tocantins","PB":"paraiba"
 }
+
+DIAS_REVERIFICAR = 7
 
 def conectar_sheets():
     creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
@@ -93,6 +95,24 @@ def get_config_dias(config):
                 pass
     return 30
 
+def deve_pular_playwright(ativo):
+    """Playwright pula: INVALIDO, ENCERRADO e datas recentes"""
+    if not ativo or ativo.strip() == "":
+        return True   # sem data = requests não verificou ainda, não é para playwright
+    v = ativo.strip().upper()
+    if v in ("INVALIDO", "ENCERRADO"):
+        return True   # pula sempre
+    if v == "SIM":
+        return True   # já tem imóveis, requests já cuida
+    if v == "FORA":
+        return False  # site instável — playwright tenta
+    # Se é data, playwright tenta (requests não achou nada)
+    try:
+        datetime.strptime(ativo.strip(), "%d/%m/%Y")
+        return False
+    except Exception:
+        return True
+
 def normalizar_link(link):
     link = re.sub(r'\?utm_.*', '', link or "")
     link = re.sub(r'&utm_[^&]*', '', link)
@@ -120,14 +140,6 @@ def link_valido(link):
         return False
     return True
 
-def eh_imovel(texto):
-    t = texto.lower()
-    if any(p in t for p in PALAVRAS_NAO_IMOVEL):
-        return False
-    if any(p in t for p in PALAVRAS_IMOVEL):
-        return True
-    return False
-
 def extrair_valor(texto):
     if not texto:
         return None
@@ -153,6 +165,14 @@ def extrair_data(texto):
             return None
     return None
 
+def eh_imovel(texto):
+    t = texto.lower()
+    if any(p in t for p in PALAVRAS_NAO_IMOVEL):
+        return False
+    if any(p in t for p in PALAVRAS_IMOVEL):
+        return True
+    return False
+
 def buscar_com_playwright(page, url_site, estados, config):
     resultados = []
     lance_min   = float(config.get("Lance Minimo", 0) or 0)
@@ -172,34 +192,24 @@ def buscar_com_playwright(page, url_site, estados, config):
             try:
                 url = url_site.rstrip("/") + termo
                 page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)  # espera JavaScript carregar
+                page.wait_for_timeout(3000)
 
-                texto_pagina = page.content().lower()
+                texto_pagina = page.inner_text("body").lower()
 
                 if estado_lower not in texto_pagina and uf.lower() not in texto_pagina:
                     continue
                 if not any(p in texto_pagina for p in PALAVRAS_IMOVEL):
                     continue
 
-                # Pegar todos os links da página
-                links_pagina = page.eval_on_selector_all("a[href]", """
-                    elements => elements.map(el => ({
-                        href: el.href,
-                        texto: el.innerText || el.textContent || ''
-                    }))
-                """)
-
-                # Pegar cards/itens
                 cards_texto = page.eval_on_selector_all(
                     ".lote, .imovel, .card, .produto, .item, article, [class*='lote'], [class*='imovel'], [class*='card']",
-                    "elements => elements.map(el => ({ texto: el.innerText, html: el.innerHTML }))"
+                    "elements => elements.map(el => ({ texto: el.innerText || '', html: el.innerHTML || '' }))"
                 )
 
                 if not cards_texto:
-                    # Tenta pegar li e article
                     cards_texto = page.eval_on_selector_all(
                         "article, li",
-                        "elements => elements.map(el => ({ texto: el.innerText, html: el.innerHTML }))"
+                        "elements => elements.map(el => ({ texto: el.innerText || '', html: el.innerHTML || '' }))"
                     )
 
                 for card in cards_texto[:100]:
@@ -226,7 +236,6 @@ def buscar_com_playwright(page, url_site, estados, config):
                         if any(x in texto_lower for x in ["judicial","vara","comarca"]):
                             continue
 
-                    # Extrair link do card
                     html = card.get("html","")
                     link_match = re.search(r'href=["\']([^"\']+)["\']', html)
                     link = link_match.group(1) if link_match else None
@@ -276,9 +285,12 @@ def buscar_com_playwright(page, url_site, estados, config):
                     break
 
             except PlaywrightTimeout:
-                print(f"  Timeout: {url_site}{termo}", flush=True)
+                print(f"  Timeout: {url}", flush=True)
                 continue
             except Exception as e:
+                if "ERR_NAME_NOT_RESOLVED" in str(e):
+                    print(f"  ENCERRADO (DNS)", flush=True)
+                    return None  # sinaliza que site está encerrado
                 print(f"  Erro: {e}", flush=True)
                 continue
 
@@ -311,17 +323,15 @@ config  = ler_configuracoes(sheet)
 estados = [e.strip().upper() for e in config.get("Estados","PR").split(",") if e.strip()]
 print(f"Estados: {estados}", flush=True)
 
-# Carregar links já gravados
 links_vistos = carregar_links_ja_gravados(sheet)
 
-# Pegar aba de resultados (não limpa — requests já limpou)
 try:
     aba_resultados = sheet.worksheet(ABA_RESULTADOS)
 except Exception:
     aba_resultados = sheet.add_worksheet(title=ABA_RESULTADOS, rows=10000, cols=8)
     aba_resultados.append_row(["Titulo","Estado","Lance Inicial (R$)","Avaliacao (R$)","Desagio (%)","Data Leilao","Link do Anuncio","Atualizado em"])
 
-# Coletar sites que requests NAO encontrou (têm data na coluna Ativo)
+# Coletar sites para Playwright das 3 abas
 abas_nomes = ["Leiloeiros1","Leiloeiros2","Leiloeiros3"]
 sites_para_playwright = []
 
@@ -333,23 +343,16 @@ for nome_aba in abas_nomes:
             url   = str(row.get("URL","")).strip()
             ativo = str(row.get("Ativo","")).strip()
             nome  = str(row.get("Nome","")).strip()
-            # Só tenta Playwright em sites que têm data (requests não achou nada)
-            # Ignora: SIM, INVALIDO, vazio
             if not url or not url.startswith("http"):
                 continue
-            if ativo.upper() in ("SIM","INVALIDO",""):
+            if deve_pular_playwright(ativo):
                 continue
-            # Se tem data, é candidato para Playwright
-            try:
-                datetime.strptime(ativo.strip(), "%d/%m/%Y")
-                sites_para_playwright.append({
-                    "nome": nome,
-                    "url": url,
-                    "aba": nome_aba,
-                    "linha": i
-                })
-            except Exception:
-                continue
+            sites_para_playwright.append({
+                "nome": nome,
+                "url":  url,
+                "aba":  nome_aba,
+                "linha": i
+            })
     except Exception as e:
         print(f"Erro ao ler {nome_aba}: {e}", flush=True)
 
@@ -368,10 +371,16 @@ with sync_playwright() as p:
     page.set_default_timeout(30000)
 
     for idx, site in enumerate(sites_para_playwright, 1):
-        print(f"[{idx}/{len(sites_para_playwright)}] Playwright: {site['nome']}", flush=True)
+        print(f"[{idx}/{len(sites_para_playwright)}] {site['nome']}", flush=True)
 
         try:
             resultados = buscar_com_playwright(page, site["url"], estados, config)
+
+            if resultados is None:
+                # Site encerrado detectado pelo Playwright
+                aba = sheet.worksheet(site["aba"])
+                aba.update_cell(site["linha"], 4, "ENCERRADO")
+                continue
 
             novos = []
             for r in resultados:
@@ -381,8 +390,7 @@ with sync_playwright() as p:
                     novos.append(r)
 
             if novos:
-                print(f"  {len(novos)} imovel(is) encontrado(s)!", flush=True)
-                # Atualiza coluna Ativo para SIM
+                print(f"  {len(novos)} imovel(is)!", flush=True)
                 aba = sheet.worksheet(site["aba"])
                 aba.update_cell(site["linha"], 4, "SIM")
                 for r in novos:
@@ -390,7 +398,6 @@ with sync_playwright() as p:
                 total_encontrado += len(novos)
             else:
                 print(f"  Sem imoveis", flush=True)
-                # Mantém a data — será tentado novamente após 7 dias
 
         except Exception as e:
             print(f"  Erro geral: {e}", flush=True)

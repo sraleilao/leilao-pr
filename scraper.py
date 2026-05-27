@@ -37,7 +37,8 @@ PALAVRAS_NAO_IMOVEL = [
 
 PALAVRAS_LINK_IGNORAR = [
     "edital","facebook","twitter","instagram","whatsapp",
-    "javascript:","mailto:","tel:","#","linkedin","youtube"
+    "javascript:","mailto:","tel:","#","linkedin","youtube",
+    "leiloes-realizados","leilão-realizado","encerrado"
 ]
 
 TERMOS_BUSCA_TEMPLATE = [
@@ -65,7 +66,8 @@ NOMES_ESTADOS = {
     "RO":"rondonia","AC":"acre","AP":"amapa","RR":"roraima","TO":"tocantins","PB":"paraiba"
 }
 
-DIAS_REVERIFICAR = 7  # dias para reVerificar sites marcados como NAO
+DIAS_REVERIFICAR_FORA     = 7   # dias para reverificar sites FORA
+DIAS_REVERIFICAR_SEMIMOV  = 7   # dias para reverificar sites sem imóveis
 
 def conectar_sheets():
     creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
@@ -91,16 +93,14 @@ def ler_configuracoes(sheet):
         return {"Estados":"PR","Lance Minimo":"0","Lance Maximo":"300000","Desagio Minimo":"0","Dias ate o leilao":"30","Tipo":"TODOS"}
 
 def config_para_chave(config):
-    """Gera uma chave única baseada nas configurações atuais"""
-    estados = config.get("Estados","PR")
-    lance_max = config.get("Lance Maximo","300000")
-    lance_min = config.get("Lance Minimo","0")
-    desagio = config.get("Desagio Minimo","0")
-    tipo = config.get("Tipo","TODOS")
-    return f"{estados}|{lance_min}|{lance_max}|{desagio}|{tipo}"
+    estados  = config.get("Estados","PR")
+    lmax     = config.get("Lance Maximo","300000")
+    lmin     = config.get("Lance Minimo","0")
+    desagio  = config.get("Desagio Minimo","0")
+    tipo     = config.get("Tipo","TODOS")
+    return f"{estados}|{lmin}|{lmax}|{desagio}|{tipo}"
 
 def ler_config_anterior(sheet):
-    """Lê a configuração usada na última rodada"""
     try:
         aba = sheet.worksheet(ABA_SISTEMA)
         dados = aba.get_all_records()
@@ -112,60 +112,75 @@ def ler_config_anterior(sheet):
         return ""
 
 def salvar_config_atual(sheet, chave_config):
-    """Salva a configuração atual na aba Sistema"""
     try:
         try:
             aba = sheet.worksheet(ABA_SISTEMA)
         except gspread.exceptions.WorksheetNotFound:
             aba = sheet.add_worksheet(title=ABA_SISTEMA, rows=20, cols=2)
             aba.append_row(["Chave","Valor"])
-
         dados = aba.get_all_records()
         for i, row in enumerate(dados, start=2):
             if row.get("Chave") == "ultima_config":
                 aba.update_cell(i, 2, chave_config)
                 return
-
         aba.append_row(["ultima_config", chave_config])
     except Exception as e:
         print(f"Erro ao salvar config: {e}", flush=True)
 
 def limpar_coluna_ativo(sheet, abas):
-    """Limpa a coluna Ativo de todas as abas quando configuração muda"""
-    print("Configuracao mudou! Limpando coluna Ativo de todas as abas...", flush=True)
+    print("Configuracao mudou! Limpando coluna Ativo...", flush=True)
     for nome_aba in abas:
         try:
             aba = sheet.worksheet(nome_aba)
-            leiloeiros = aba.get_all_values()
-            # Limpa coluna D (índice 3) de todas as linhas exceto cabeçalho
-            updates = []
-            for i in range(2, len(leiloeiros) + 1):
-                updates.append(gspread.Cell(i, 4, ""))
+            vals = aba.get_all_values()
+            updates = [gspread.Cell(i, 4, "") for i in range(2, len(vals)+1)]
             if updates:
                 aba.update_cells(updates)
-            print(f"  Aba '{nome_aba}' limpa!", flush=True)
+            print(f"  '{nome_aba}' limpa!", flush=True)
         except Exception as e:
             print(f"  Erro ao limpar '{nome_aba}': {e}", flush=True)
 
 def deve_pular(ativo):
-    """Decide se deve pular o site baseado no valor da coluna Ativo"""
     if not ativo or ativo.strip() == "":
-        return False  # nunca verificado — deve verificar
-    if ativo.strip().upper() == "SIM":
-        return False  # tem imóveis — sempre reverifica
-    if ativo.strip().upper() in ("INVALIDO", "INVALIDO"):
-        return True   # URL inválida — sempre pula
-    if ativo.strip().upper() == "NAO":
-        return False  # marcado simples como NAO — reverifica
-    # Verifica se é uma data (formato dd/mm/yyyy)
+        return False
+    v = ativo.strip().upper()
+    if v == "SIM":
+        return False  # sempre reverifica sites com imóveis
+    if v == "INVALIDO":
+        return True   # URL inválida — pula sempre
+    if v == "ENCERRADO":
+        return True   # DNS não resolve — pula sempre
+    if v == "FORA":
+        return False  # site instável — requests tenta de novo
+    # Se é data, verifica quantos dias passaram
     try:
         data = datetime.strptime(ativo.strip(), "%d/%m/%Y")
-        dias_passados = (datetime.today() - data).days
-        if dias_passados < DIAS_REVERIFICAR:
-            return True  # verificado recentemente — pula
-        return False  # já faz mais de 7 dias — reverifica
+        dias = (datetime.today() - data).days
+        return dias < DIAS_REVERIFICAR_SEMIMOV
     except Exception:
-        return False  # formato desconhecido — verifica
+        return False
+
+def testar_site(url):
+    """
+    Retorna: 'OK', 'ENCERRADO', 'FORA'
+    - OK: site respondeu normalmente
+    - ENCERRADO: DNS não resolve (site provavelmente não existe mais)
+    - FORA: timeout, erro HTTP, ou outro problema temporário
+    """
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code < 400:
+            return "OK"
+        else:
+            return "FORA"
+    except requests.exceptions.ConnectionError as e:
+        if "Name or service not known" in str(e) or "Temporary failure in name resolution" in str(e) or "ERR_NAME_NOT_RESOLVED" in str(e):
+            return "ENCERRADO"
+        return "FORA"
+    except requests.exceptions.Timeout:
+        return "FORA"
+    except Exception:
+        return "FORA"
 
 def normalizar_link(link):
     link = re.sub(r'\?utm_.*', '', link or "")
@@ -206,13 +221,6 @@ def link_valido(link):
         return False
     return True
 
-def site_ativo(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        return r.status_code < 400
-    except Exception:
-        return False
-
 def extrair_valor(texto):
     if not texto:
         return None
@@ -239,7 +247,7 @@ def extrair_data(texto):
     return None
 
 def get_config_dias(config):
-    for chave in ["Dias ate o leilao","Dias Ate Leilao","Dias Ate o Leilao","dias ate o leilao"]:
+    for chave in ["Dias ate o leilao","Dias Ate Leilao","Dias Ate o Leilao"]:
         if chave in config:
             try:
                 return int(config[chave])
@@ -379,7 +387,7 @@ def garantir_aba_resultados(sheet):
     try:
         aba = sheet.worksheet(ABA_RESULTADOS)
         if ABA_LEILOEIROS == "Leiloeiros1":
-            print("Limpando Resultados para nova rodada...", flush=True)
+            print("Limpando Resultados...", flush=True)
             aba.clear()
             aba.append_row(["Titulo","Estado","Lance Inicial (R$)","Avaliacao (R$)","Desagio (%)","Data Leilao","Link do Anuncio","Atualizado em"])
         return aba
@@ -413,19 +421,17 @@ estados     = [e.strip().upper() for e in config.get("Estados","PR").split(",") 
 chave_atual = config_para_chave(config)
 print(f"Estados: {estados}", flush=True)
 
-# Verificar se configuração mudou — se sim, limpa coluna Ativo de todas as abas
 if ABA_LEILOEIROS == "Leiloeiros1":
     chave_anterior = ler_config_anterior(sheet)
     if chave_anterior != chave_atual:
-        print(f"Configuracao mudou! Anterior: {chave_anterior} | Atual: {chave_atual}", flush=True)
+        print(f"Configuracao mudou! Limpando Ativo...", flush=True)
         limpar_coluna_ativo(sheet, ["Leiloeiros1","Leiloeiros2","Leiloeiros3"])
         salvar_config_atual(sheet, chave_atual)
     else:
-        print("Configuracao igual — usando cache de sites verificados.", flush=True)
+        print("Configuracao igual — usando cache.", flush=True)
 
 aba_resultados = garantir_aba_resultados(sheet)
 links_vistos   = carregar_links_ja_gravados(sheet)
-
 aba_leiloeiros = sheet.worksheet(ABA_LEILOEIROS)
 leiloeiros     = aba_leiloeiros.get_all_records()
 print(f"Processando '{ABA_LEILOEIROS}' — {len(leiloeiros)} leiloeiros...", flush=True)
@@ -444,17 +450,23 @@ for i, row in enumerate(leiloeiros, start=2):
         time.sleep(0.3)
         continue
 
-    # Pular sites já verificados recentemente sem imóveis
     if deve_pular(ativo):
         total_pulados += 1
         continue
 
     print(f"[{i-1}/{len(leiloeiros)}] {nome}", flush=True)
 
-    if not site_ativo(url):
-        print(f"  Fora do ar", flush=True)
-        aba_leiloeiros.update_cell(i, 4, hoje_str)
-        time.sleep(0.5)
+    status = testar_site(url)
+
+    if status == "ENCERRADO":
+        print(f"  ENCERRADO (DNS nao resolve)", flush=True)
+        aba_leiloeiros.update_cell(i, 4, "ENCERRADO")
+        time.sleep(0.3)
+        continue
+    elif status == "FORA":
+        print(f"  FORA do ar", flush=True)
+        aba_leiloeiros.update_cell(i, 4, "FORA")
+        time.sleep(0.3)
         continue
 
     resultados = buscar_imoveis(url, estados, config)
