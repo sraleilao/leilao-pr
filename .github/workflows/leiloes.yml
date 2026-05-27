@@ -37,7 +37,6 @@ jobs:
 
   bloco2:
     if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros2' || github.event_name == 'schedule' }}
-    needs: bloco1
     runs-on: ubuntu-latest
     timeout-minutes: 110
     steps:
@@ -54,7 +53,6 @@ jobs:
 
   bloco3:
     if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros3' || github.event_name == 'schedule' }}
-    needs: bloco2
     runs-on: ubuntu-latest
     timeout-minutes: 110
     steps:
@@ -71,7 +69,7 @@ jobs:
 
   playwright:
     if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'playwright' || github.event_name == 'schedule') }}
-    needs: bloco3
+    needs: [bloco1, bloco2, bloco3]
     runs-on: ubuntu-latest
     timeout-minutes: 110
     steps:
