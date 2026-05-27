@@ -7,14 +7,17 @@ import gspread
 from google.oauth2.service_account import Credentials
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
-print("Iniciando robo de leiloes...", flush=True)
+print("Iniciando robo de leiloes (paralelo)...", flush=True)
 
 SPREADSHEET_ID = "1NEZbf37cLnq9Asf9aA76cy4Wjtn7VTLaUQ85oE-ksr0"
 ABA_LEILOEIROS = os.environ.get("ABA_LEILOEIROS", "Leiloeiros1")
 ABA_RESULTADOS = "Resultados"
 ABA_CONFIG     = "Configuracoes"
 ABA_SISTEMA    = "Sistema"
+WORKERS        = 5  # sites simultâneos
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
@@ -66,8 +69,8 @@ NOMES_ESTADOS = {
     "RO":"rondonia","AC":"acre","AP":"amapa","RR":"roraima","TO":"tocantins","PB":"paraiba"
 }
 
-DIAS_REVERIFICAR_FORA     = 7   # dias para reverificar sites FORA
-DIAS_REVERIFICAR_SEMIMOV  = 7   # dias para reverificar sites sem imóveis
+DIAS_REVERIFICAR = 7
+lock = threading.Lock()  # para operações thread-safe
 
 def conectar_sheets():
     creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
@@ -93,18 +96,12 @@ def ler_configuracoes(sheet):
         return {"Estados":"PR","Lance Minimo":"0","Lance Maximo":"300000","Desagio Minimo":"0","Dias ate o leilao":"30","Tipo":"TODOS"}
 
 def config_para_chave(config):
-    estados  = config.get("Estados","PR")
-    lmax     = config.get("Lance Maximo","300000")
-    lmin     = config.get("Lance Minimo","0")
-    desagio  = config.get("Desagio Minimo","0")
-    tipo     = config.get("Tipo","TODOS")
-    return f"{estados}|{lmin}|{lmax}|{desagio}|{tipo}"
+    return f"{config.get('Estados','PR')}|{config.get('Lance Minimo','0')}|{config.get('Lance Maximo','300000')}|{config.get('Desagio Minimo','0')}|{config.get('Tipo','TODOS')}"
 
 def ler_config_anterior(sheet):
     try:
         aba = sheet.worksheet(ABA_SISTEMA)
-        dados = aba.get_all_records()
-        for row in dados:
+        for row in aba.get_all_records():
             if row.get("Chave") == "ultima_config":
                 return row.get("Valor","")
         return ""
@@ -118,8 +115,7 @@ def salvar_config_atual(sheet, chave_config):
         except gspread.exceptions.WorksheetNotFound:
             aba = sheet.add_worksheet(title=ABA_SISTEMA, rows=20, cols=2)
             aba.append_row(["Chave","Valor"])
-        dados = aba.get_all_records()
-        for i, row in enumerate(dados, start=2):
+        for i, row in enumerate(aba.get_all_records(), start=2):
             if row.get("Chave") == "ultima_config":
                 aba.update_cell(i, 2, chave_config)
                 return
@@ -128,7 +124,7 @@ def salvar_config_atual(sheet, chave_config):
         print(f"Erro ao salvar config: {e}", flush=True)
 
 def limpar_coluna_ativo(sheet, abas):
-    print("Configuracao mudou! Limpando coluna Ativo...", flush=True)
+    print("Configuracao mudou! Limpando Ativo...", flush=True)
     for nome_aba in abas:
         try:
             aba = sheet.worksheet(nome_aba)
@@ -145,39 +141,25 @@ def deve_pular(ativo):
         return False
     v = ativo.strip().upper()
     if v == "SIM":
-        return False  # sempre reverifica sites com imóveis
-    if v == "INVALIDO":
-        return True   # URL inválida — pula sempre
-    if v == "ENCERRADO":
-        return True   # DNS não resolve — pula sempre
+        return False
+    if v in ("INVALIDO", "ENCERRADO"):
+        return True
     if v == "FORA":
-        return False  # site instável — requests tenta de novo
-    # Se é data, verifica quantos dias passaram
+        return False
     try:
         data = datetime.strptime(ativo.strip(), "%d/%m/%Y")
-        dias = (datetime.today() - data).days
-        return dias < DIAS_REVERIFICAR_SEMIMOV
+        return (datetime.today() - data).days < DIAS_REVERIFICAR
     except Exception:
         return False
 
 def testar_site(url):
-    """
-    Retorna: 'OK', 'ENCERRADO', 'FORA'
-    - OK: site respondeu normalmente
-    - ENCERRADO: DNS não resolve (site provavelmente não existe mais)
-    - FORA: timeout, erro HTTP, ou outro problema temporário
-    """
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
-        if r.status_code < 400:
-            return "OK"
-        else:
-            return "FORA"
+        return "OK" if r.status_code < 400 else "FORA"
     except requests.exceptions.ConnectionError as e:
-        if "Name or service not known" in str(e) or "Temporary failure in name resolution" in str(e) or "ERR_NAME_NOT_RESOLVED" in str(e):
+        msg = str(e)
+        if any(x in msg for x in ["Name or service not known","Temporary failure","ERR_NAME_NOT_RESOLVED"]):
             return "ENCERRADO"
-        return "FORA"
-    except requests.exceptions.Timeout:
         return "FORA"
     except Exception:
         return "FORA"
@@ -193,10 +175,8 @@ def carregar_links_ja_gravados(sheet):
         todos = aba.get_all_values()
         links = set()
         for row in todos[1:]:
-            if len(row) >= 7:
-                link = row[6]
-                if link:
-                    links.add(normalizar_link(link))
+            if len(row) >= 7 and row[6]:
+                links.add(normalizar_link(row[6]))
         print(f"Links ja gravados: {len(links)}", flush=True)
         return links
     except Exception:
@@ -209,17 +189,14 @@ def url_valida(url):
         return False
     if not url.startswith("http"):
         return False
-    dominios_ignorar = ["facebook.com","instagram.com","twitter.com","whatsapp.com","youtube.com"]
-    if any(d in url.lower() for d in dominios_ignorar):
+    if any(d in url.lower() for d in ["facebook.com","instagram.com","twitter.com","whatsapp.com","youtube.com"]):
         return False
     return True
 
 def link_valido(link):
     if not link or not link.startswith("http"):
         return False
-    if any(p in link.lower() for p in PALAVRAS_LINK_IGNORAR):
-        return False
-    return True
+    return not any(p in link.lower() for p in PALAVRAS_LINK_IGNORAR)
 
 def extrair_valor(texto):
     if not texto:
@@ -259,9 +236,7 @@ def eh_imovel(texto):
     t = texto.lower()
     if any(p in t for p in PALAVRAS_NAO_IMOVEL):
         return False
-    if any(p in t for p in PALAVRAS_IMOVEL):
-        return True
-    return False
+    return any(p in t for p in PALAVRAS_IMOVEL)
 
 def buscar_imoveis(url_site, estados, config):
     resultados = []
@@ -270,9 +245,8 @@ def buscar_imoveis(url_site, estados, config):
     desagio_min = float(config.get("Desagio Minimo", 0) or 0)
     dias_limite = get_config_dias(config)
     tipo_config = config.get("Tipo", "TODOS").upper().strip()
-
-    hoje   = datetime.today()
-    limite = hoje + timedelta(days=dias_limite)
+    hoje        = datetime.today()
+    limite      = hoje + timedelta(days=dias_limite)
 
     for uf in estados:
         estado_lower = NOMES_ESTADOS.get(uf, uf.lower())
@@ -374,14 +348,39 @@ def buscar_imoveis(url_site, estados, config):
                 if resultados:
                     break
 
-            except Exception as e:
-                print(f"  Erro: {e}", flush=True)
+            except Exception:
                 continue
 
         if resultados:
             break
 
     return resultados
+
+def processar_site(args):
+    """Processa um site — roda em paralelo"""
+    i, row, estados, config, hoje_str = args
+    nome  = str(row.get("Nome","")).strip()
+    url   = str(row.get("URL","")).strip()
+    ativo = str(row.get("Ativo","")).strip()
+
+    if not url_valida(url):
+        return i, nome, "INVALIDO", []
+
+    if deve_pular(ativo):
+        return i, nome, "PULAR", []
+
+    status = testar_site(url)
+
+    if status == "ENCERRADO":
+        return i, nome, "ENCERRADO", []
+    elif status == "FORA":
+        return i, nome, "FORA", []
+
+    resultados = buscar_imoveis(url, estados, config)
+    if resultados:
+        return i, nome, "SIM", resultados
+    else:
+        return i, nome, hoje_str, []
 
 def garantir_aba_resultados(sheet):
     try:
@@ -424,7 +423,7 @@ print(f"Estados: {estados}", flush=True)
 if ABA_LEILOEIROS == "Leiloeiros1":
     chave_anterior = ler_config_anterior(sheet)
     if chave_anterior != chave_atual:
-        print(f"Configuracao mudou! Limpando Ativo...", flush=True)
+        print("Configuracao mudou! Limpando Ativo...", flush=True)
         limpar_coluna_ativo(sheet, ["Leiloeiros1","Leiloeiros2","Leiloeiros3"])
         salvar_config_atual(sheet, chave_atual)
     else:
@@ -434,61 +433,55 @@ aba_resultados = garantir_aba_resultados(sheet)
 links_vistos   = carregar_links_ja_gravados(sheet)
 aba_leiloeiros = sheet.worksheet(ABA_LEILOEIROS)
 leiloeiros     = aba_leiloeiros.get_all_records()
-print(f"Processando '{ABA_LEILOEIROS}' — {len(leiloeiros)} leiloeiros...", flush=True)
+print(f"Processando '{ABA_LEILOEIROS}' — {len(leiloeiros)} leiloeiros com {WORKERS} workers...", flush=True)
 
 hoje_str         = datetime.today().strftime("%d/%m/%Y")
 total_encontrado = 0
 total_pulados    = 0
 
-for i, row in enumerate(leiloeiros, start=2):
-    nome  = str(row.get("Nome","")).strip()
-    url   = str(row.get("URL","")).strip()
-    ativo = str(row.get("Ativo","")).strip()
+# Preparar argumentos para processamento paralelo
+args_list = [(i, row, estados, config, hoje_str) for i, row in enumerate(leiloeiros, start=2)]
 
-    if not url_valida(url):
-        aba_leiloeiros.update_cell(i, 4, "INVALIDO")
-        time.sleep(0.3)
-        continue
+# Processar em lotes de WORKERS sites simultâneos
+batch_size = WORKERS
+for batch_start in range(0, len(args_list), batch_size):
+    batch = args_list[batch_start:batch_start + batch_size]
 
-    if deve_pular(ativo):
-        total_pulados += 1
-        continue
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(processar_site, args): args for args in batch}
 
-    print(f"[{i-1}/{len(leiloeiros)}] {nome}", flush=True)
+        for future in as_completed(futures):
+            try:
+                i, nome, status, resultados = future.result()
 
-    status = testar_site(url)
+                if status == "PULAR":
+                    total_pulados += 1
+                    continue
 
-    if status == "ENCERRADO":
-        print(f"  ENCERRADO (DNS nao resolve)", flush=True)
-        aba_leiloeiros.update_cell(i, 4, "ENCERRADO")
-        time.sleep(0.3)
-        continue
-    elif status == "FORA":
-        print(f"  FORA do ar", flush=True)
-        aba_leiloeiros.update_cell(i, 4, "FORA")
-        time.sleep(0.3)
-        continue
+                print(f"[{i-1}/{len(leiloeiros)}] {nome} → {status}", flush=True)
 
-    resultados = buscar_imoveis(url, estados, config)
+                # Atualizar coluna Ativo (thread-safe via lock)
+                with lock:
+                    try:
+                        aba_leiloeiros.update_cell(i, 4, status if status != "SIM" or not resultados else "SIM")
+                    except Exception:
+                        pass
 
-    novos = []
-    for r in resultados:
-        chave = normalizar_link(r["Link"])
-        if chave not in links_vistos:
-            links_vistos.add(chave)
-            novos.append(r)
+                if resultados:
+                    novos = []
+                    with lock:
+                        for r in resultados:
+                            chave = normalizar_link(r["Link"])
+                            if chave not in links_vistos:
+                                links_vistos.add(chave)
+                                novos.append(r)
 
-    if novos:
-        print(f"  {len(novos)} imovel(is)!", flush=True)
-        aba_leiloeiros.update_cell(i, 4, "SIM")
-        for r in novos:
-            gravar_linha(aba_resultados, r)
-        total_encontrado += len(novos)
-    else:
-        print(f"  Sem imoveis", flush=True)
-        aba_leiloeiros.update_cell(i, 4, hoje_str)
+                    for r in novos:
+                        gravar_linha(aba_resultados, r)
+                        total_encontrado += 1
 
-    time.sleep(1)
+            except Exception as e:
+                print(f"  Erro no future: {e}", flush=True)
 
-print(f"Total: {total_encontrado} imoveis | Pulados: {total_pulados}", flush=True)
+print(f"\nTotal: {total_encontrado} imoveis | Pulados: {total_pulados}", flush=True)
 print("Robo finalizado!", flush=True)
