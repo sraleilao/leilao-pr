@@ -17,7 +17,7 @@ ABA_LEILOEIROS = os.environ.get("ABA_LEILOEIROS", "Leiloeiros1")
 ABA_RESULTADOS = "Resultados"
 ABA_CONFIG     = "Configuracoes"
 ABA_SISTEMA    = "Sistema"
-WORKERS        = 5  # sites simultâneos
+WORKERS        = 5
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
@@ -42,6 +42,13 @@ PALAVRAS_LINK_IGNORAR = [
     "edital","facebook","twitter","instagram","whatsapp",
     "javascript:","mailto:","tel:","#","linkedin","youtube",
     "leiloes-realizados","leilão-realizado","encerrado"
+]
+
+# Indicadores de site JavaScript (precisa do Playwright)
+INDICADORES_JS = [
+    "react","angular","vue","next.js","nuxt","loading...","carregando",
+    "please wait","aguarde","app-root","ng-app","__next","__nuxt",
+    "window.__","data-reactroot","data-v-","ember","backbone"
 ]
 
 TERMOS_BUSCA_TEMPLATE = [
@@ -70,7 +77,7 @@ NOMES_ESTADOS = {
 }
 
 DIAS_REVERIFICAR = 7
-lock = threading.Lock()  # para operações thread-safe
+lock = threading.Lock()
 
 def conectar_sheets():
     creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
@@ -141,28 +148,47 @@ def deve_pular(ativo):
         return False
     v = ativo.strip().upper()
     if v == "SIM":
-        return False
+        return False  # sempre reverifica
     if v in ("INVALIDO", "ENCERRADO"):
-        return True
-    if v == "FORA":
-        return False
+        return True   # pula sempre
+    if v in ("FORA", "JS"):
+        return False  # tenta de novo
     try:
         data = datetime.strptime(ativo.strip(), "%d/%m/%Y")
         return (datetime.today() - data).days < DIAS_REVERIFICAR
     except Exception:
         return False
 
+def detectar_js(html, texto):
+    """Detecta se o site usa JavaScript para carregar conteúdo"""
+    html_lower = html.lower()
+    texto_lower = texto.lower()
+
+    # Verificar indicadores de framework JS
+    for indicador in INDICADORES_JS:
+        if indicador in html_lower:
+            return True
+
+    # Página com muito pouco texto visível mas muito HTML
+    if len(html) > 5000 and len(texto) < 200:
+        return True
+
+    return False
+
 def testar_site(url):
+    """Retorna: 'OK', 'ENCERRADO', 'FORA'"""
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
-        return "OK" if r.status_code < 400 else "FORA"
+        if r.status_code < 400:
+            return "OK", r.text
+        return "FORA", ""
     except requests.exceptions.ConnectionError as e:
         msg = str(e)
         if any(x in msg for x in ["Name or service not known","Temporary failure","ERR_NAME_NOT_RESOLVED"]):
-            return "ENCERRADO"
-        return "FORA"
+            return "ENCERRADO", ""
+        return "FORA", ""
     except Exception:
-        return "FORA"
+        return "FORA", ""
 
 def normalizar_link(link):
     link = re.sub(r'\?utm_.*', '', link or "")
@@ -238,7 +264,7 @@ def eh_imovel(texto):
         return False
     return any(p in t for p in PALAVRAS_IMOVEL)
 
-def buscar_imoveis(url_site, estados, config):
+def buscar_imoveis(url_site, estados, config, html_inicial=None):
     resultados = []
     lance_min   = float(config.get("Lance Minimo", 0) or 0)
     lance_max   = float(config.get("Lance Maximo", 300000) or 300000)
@@ -357,30 +383,37 @@ def buscar_imoveis(url_site, estados, config):
     return resultados
 
 def processar_site(args):
-    """Processa um site — roda em paralelo"""
     i, row, estados, config, hoje_str = args
     nome  = str(row.get("Nome","")).strip()
     url   = str(row.get("URL","")).strip()
     ativo = str(row.get("Ativo","")).strip()
 
     if not url_valida(url):
-        return i, nome, "INVALIDO", []
+        return i, nome, "INVALIDO", [], False
 
     if deve_pular(ativo):
-        return i, nome, "PULAR", []
+        return i, nome, "PULAR", [], False
 
-    status = testar_site(url)
+    status, html = testar_site(url)
 
     if status == "ENCERRADO":
-        return i, nome, "ENCERRADO", []
+        return i, nome, "ENCERRADO", [], False
     elif status == "FORA":
-        return i, nome, "FORA", []
+        return i, nome, "FORA", [], False
 
-    resultados = buscar_imoveis(url, estados, config)
+    # Detectar se site usa JavaScript
+    soup = BeautifulSoup(html, "html.parser")
+    texto_visivel = soup.get_text()
+    eh_js = detectar_js(html, texto_visivel)
+
+    if eh_js:
+        return i, nome, "JS", [], True  # True = precisa do Playwright
+
+    resultados = buscar_imoveis(url, estados, config, html)
     if resultados:
-        return i, nome, "SIM", resultados
+        return i, nome, "SIM", resultados, False
     else:
-        return i, nome, hoje_str, []
+        return i, nome, hoje_str, [], False
 
 def garantir_aba_resultados(sheet):
     try:
@@ -438,11 +471,10 @@ print(f"Processando '{ABA_LEILOEIROS}' — {len(leiloeiros)} leiloeiros com {WOR
 hoje_str         = datetime.today().strftime("%d/%m/%Y")
 total_encontrado = 0
 total_pulados    = 0
+total_js         = 0
 
-# Preparar argumentos para processamento paralelo
 args_list = [(i, row, estados, config, hoje_str) for i, row in enumerate(leiloeiros, start=2)]
 
-# Processar em lotes de WORKERS sites simultâneos
 batch_size = WORKERS
 for batch_start in range(0, len(args_list), batch_size):
     batch = args_list[batch_start:batch_start + batch_size]
@@ -452,7 +484,7 @@ for batch_start in range(0, len(args_list), batch_size):
 
         for future in as_completed(futures):
             try:
-                i, nome, status, resultados = future.result()
+                i, nome, status, resultados, precisa_js = future.result()
 
                 if status == "PULAR":
                     total_pulados += 1
@@ -460,12 +492,14 @@ for batch_start in range(0, len(args_list), batch_size):
 
                 print(f"[{i-1}/{len(leiloeiros)}] {nome} → {status}", flush=True)
 
-                # Atualizar coluna Ativo (thread-safe via lock)
                 with lock:
                     try:
-                        aba_leiloeiros.update_cell(i, 4, status if status != "SIM" or not resultados else "SIM")
+                        aba_leiloeiros.update_cell(i, 4, status)
                     except Exception:
                         pass
+
+                if precisa_js:
+                    total_js += 1
 
                 if resultados:
                     novos = []
@@ -483,5 +517,5 @@ for batch_start in range(0, len(args_list), batch_size):
             except Exception as e:
                 print(f"  Erro no future: {e}", flush=True)
 
-print(f"\nTotal: {total_encontrado} imoveis | Pulados: {total_pulados}", flush=True)
+print(f"\nTotal: {total_encontrado} imoveis | Pulados: {total_pulados} | JS detectados: {total_js}", flush=True)
 print("Robo finalizado!", flush=True)
