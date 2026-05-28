@@ -13,6 +13,10 @@ SPREADSHEET_ID = "1NEZbf37cLnq9Asf9aA76cy4Wjtn7VTLaUQ85oE-ksr0"
 ABA_RESULTADOS = "Resultados"
 ABA_CONFIG     = "Configuracoes"
 
+# Bloco que este processo vai executar (1, 2 ou 3)
+PW_BLOCO = int(os.environ.get("PW_BLOCO", "1"))
+PW_TOTAL = int(os.environ.get("PW_TOTAL", "1"))
+
 PALAVRAS_IMOVEL = [
     "apartamento","casa ","terreno","sitio","sítio","chacara","chácara",
     "sobrado","cobertura","flat","studio","kitnet","fazenda","rural",
@@ -165,7 +169,7 @@ def buscar_com_playwright(page, url_site, estados, config):
             try:
                 url = url_site.rstrip("/") + termo
                 page.goto(url, timeout=15000, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(2000)
 
                 texto_pagina = page.inner_text("body").lower()
 
@@ -287,7 +291,7 @@ def gravar_linha(aba_resultados, resultado):
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 sheet = conectar_sheets()
-print("Conectado ao Google Sheets!", flush=True)
+print(f"Conectado! Bloco {PW_BLOCO}/{PW_TOTAL}", flush=True)
 
 config  = ler_configuracoes(sheet)
 estados = [e.strip().upper() for e in config.get("Estados","PR").split(",") if e.strip()]
@@ -303,7 +307,7 @@ except Exception:
 
 # Coletar APENAS sites marcados como JS
 abas_nomes = ["Leiloeiros1","Leiloeiros2","Leiloeiros3"]
-sites_js = []
+todos_js = []
 
 for nome_aba in abas_nomes:
     try:
@@ -315,9 +319,8 @@ for nome_aba in abas_nomes:
             nome  = str(row.get("Nome","")).strip()
             if not url or not url.startswith("http"):
                 continue
-            # Playwright só processa sites marcados como JS
             if ativo.strip().upper() == "JS":
-                sites_js.append({
+                todos_js.append({
                     "nome":  nome,
                     "url":   url,
                     "aba":   nome_aba,
@@ -326,10 +329,13 @@ for nome_aba in abas_nomes:
     except Exception as e:
         print(f"Erro ao ler {nome_aba}: {e}", flush=True)
 
-print(f"Sites JS para Playwright: {len(sites_js)}", flush=True)
+# Dividir em blocos — este processo pega apenas seu bloco
+sites_bloco = [s for idx, s in enumerate(todos_js) if idx % PW_TOTAL == (PW_BLOCO - 1)]
 
-if not sites_js:
-    print("Nenhum site JS encontrado. Playwright finalizado!", flush=True)
+print(f"Total JS: {len(todos_js)} | Este bloco: {len(sites_bloco)}", flush=True)
+
+if not sites_bloco:
+    print("Nenhum site JS neste bloco. Finalizado!", flush=True)
     exit(0)
 
 hoje_str         = datetime.today().strftime("%d/%m/%Y")
@@ -344,8 +350,8 @@ with sync_playwright() as p:
     page = context.new_page()
     page.set_default_timeout(15000)
 
-    for idx, site in enumerate(sites_js, 1):
-        print(f"[{idx}/{len(sites_js)}] {site['nome']}", flush=True)
+    for idx, site in enumerate(sites_bloco, 1):
+        print(f"[{idx}/{len(sites_bloco)}] {site['nome']}", flush=True)
 
         try:
             resultados = buscar_com_playwright(page, site["url"], estados, config)
@@ -383,4 +389,4 @@ with sync_playwright() as p:
     context.close()
     browser.close()
 
-print(f"Playwright finalizado! Total: {total_encontrado} imoveis", flush=True)
+print(f"Playwright bloco {PW_BLOCO} finalizado! Total: {total_encontrado} imoveis", flush=True)

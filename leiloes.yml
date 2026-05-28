@@ -1,0 +1,156 @@
+name: Robô Leilões Paraná
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      aba:
+        description: 'Qual aba processar?'
+        required: true
+        default: 'todas'
+        type: choice
+        options:
+          - todas
+          - Leiloeiros1
+          - Leiloeiros2
+          - Leiloeiros3
+          - playwright
+          - relatorio
+
+jobs:
+  bloco1:
+    if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros1' || github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Bloco 1
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          ABA_LEILOEIROS: Leiloeiros1
+        run: python scraper.py
+
+  bloco2:
+    if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros2' || github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Bloco 2
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          ABA_LEILOEIROS: Leiloeiros2
+        run: python scraper.py
+
+  bloco3:
+    if: ${{ github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'Leiloeiros3' || github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Bloco 3
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          ABA_LEILOEIROS: Leiloeiros3
+        run: python scraper.py
+
+  playwright1:
+    if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'playwright' || github.event_name == 'schedule') }}
+    needs: [bloco1, bloco2, bloco3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Instalar dependencias do Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
+      - name: Instalar Chromium
+        run: python -m playwright install chromium
+      - name: Playwright Bloco 1
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PW_BLOCO: "1"
+          PW_TOTAL: "3"
+        run: python scraper_playwright.py
+
+  playwright2:
+    if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'playwright' || github.event_name == 'schedule') }}
+    needs: [bloco1, bloco2, bloco3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Instalar dependencias do Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
+      - name: Instalar Chromium
+        run: python -m playwright install chromium
+      - name: Playwright Bloco 2
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PW_BLOCO: "2"
+          PW_TOTAL: "3"
+        run: python scraper_playwright.py
+
+  playwright3:
+    if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'playwright' || github.event_name == 'schedule') }}
+    needs: [bloco1, bloco2, bloco3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Instalar dependencias do Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
+      - name: Instalar Chromium
+        run: python -m playwright install chromium
+      - name: Playwright Bloco 3
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PW_BLOCO: "3"
+          PW_TOTAL: "3"
+        run: python scraper_playwright.py
+
+  relatorio:
+    if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'relatorio' || github.event_name == 'schedule') }}
+    needs: [playwright1, playwright2, playwright3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Gerar Top 10
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: python relatorio.py
