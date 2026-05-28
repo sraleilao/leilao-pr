@@ -67,7 +67,7 @@ jobs:
           ABA_LEILOEIROS: Leiloeiros3
         run: python scraper.py
 
-  playwright:
+  playwright1:
     if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'playwright' || github.event_name == 'schedule') }}
     needs: [bloco1, bloco2, bloco3]
     runs-on: ubuntu-latest
@@ -84,14 +84,64 @@ jobs:
           sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
       - name: Instalar Chromium
         run: python -m playwright install chromium
-      - name: Playwright
+      - name: Playwright Bloco 1
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PW_BLOCO: "1"
+          PW_TOTAL: "3"
+        run: python scraper_playwright.py
+
+  playwright2:
+    if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'playwright' || github.event_name == 'schedule') }}
+    needs: [bloco1, bloco2, bloco3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Instalar dependencias do Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
+      - name: Instalar Chromium
+        run: python -m playwright install chromium
+      - name: Playwright Bloco 2
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PW_BLOCO: "2"
+          PW_TOTAL: "3"
+        run: python scraper_playwright.py
+
+  playwright3:
+    if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'playwright' || github.event_name == 'schedule') }}
+    needs: [bloco1, bloco2, bloco3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Instalar dependencias do Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
+      - name: Instalar Chromium
+        run: python -m playwright install chromium
+      - name: Playwright Bloco 3
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PW_BLOCO: "3"
+          PW_TOTAL: "3"
         run: python scraper_playwright.py
 
   relatorio:
     if: ${{ always() && (github.event.inputs.aba == 'todas' || github.event.inputs.aba == 'relatorio' || github.event_name == 'schedule') }}
-    needs: playwright
+    needs: [playwright1, playwright2, playwright3]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
