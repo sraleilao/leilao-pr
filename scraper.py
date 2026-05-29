@@ -465,7 +465,7 @@ if ABA_LEILOEIROS == "Leiloeiros1":
 aba_resultados = garantir_aba_resultados(sheet)
 links_vistos   = carregar_links_ja_gravados(sheet)
 aba_leiloeiros = sheet.worksheet(ABA_LEILOEIROS)
-leiloeiros     = aba_leiloeiros.get_all_records()
+leiloeiros     = aba_leiloeiros.get_all_records(expected_headers=["Nome","URL","Estado","Ativo"])
 print(f"Processando '{ABA_LEILOEIROS}' — {len(leiloeiros)} leiloeiros com {WORKERS} workers...", flush=True)
 
 hoje_str         = datetime.today().strftime("%d/%m/%Y")
