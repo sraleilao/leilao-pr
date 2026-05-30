@@ -17,7 +17,7 @@ ABA_LEILOEIROS = os.environ.get("ABA_LEILOEIROS", "Leiloeiros1")
 ABA_RESULTADOS = "Resultados"
 ABA_CONFIG     = "Configuracoes"
 ABA_SISTEMA    = "Sistema"
-WORKERS        = 5  # sites simultâneos
+WORKERS        = 5
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
@@ -42,6 +42,30 @@ PALAVRAS_LINK_IGNORAR = [
     "edital","facebook","twitter","instagram","whatsapp",
     "javascript:","mailto:","tel:","#","linkedin","youtube",
     "leiloes-realizados","leilão-realizado","encerrado"
+]
+
+# Palavras que indicam TERRENO VAZIO (sem construção) — exclui
+PALAVRAS_TERRENO_VAZIO = [
+    "terreno vazio","lote vazio","área nua","area nua","lote nu","terreno nu",
+    "sem construção","sem construcao","sem edificação","sem edificacao",
+    "gleba","área rural nua","area rural nua","campo aberto",
+    "terreno baldio","lote baldio","sem benfeitorias"
+]
+
+# Palavras que CONFIRMAM construção — garante que é imóvel construído
+PALAVRAS_CONSTRUCAO = [
+    "apartamento","casa ","casa,","sobrado","cobertura","flat","studio","kitnet",
+    "sala comercial","loja","galpao","galpão","edificio","edifício",
+    "condominio","condomínio","construção","construcao","edificação","edificacao",
+    "m² construído","m2 construído","m² edificado","m2 edificado",
+    "imóvel construído","imovel construido","residência","residencia",
+    "prédio","predio","chalé","chale","bangalô","bangalo"
+]
+
+INDICADORES_JS = [
+    "react","angular","vue","next.js","nuxt","loading...","carregando",
+    "please wait","aguarde","app-root","ng-app","__next","__nuxt",
+    "window.__","data-reactroot","data-v-","ember","backbone"
 ]
 
 TERMOS_BUSCA_TEMPLATE = [
@@ -70,7 +94,7 @@ NOMES_ESTADOS = {
 }
 
 DIAS_REVERIFICAR = 7
-lock = threading.Lock()  # para operações thread-safe
+lock = threading.Lock()
 
 def conectar_sheets():
     creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
@@ -144,7 +168,7 @@ def deve_pular(ativo):
         return False
     if v in ("INVALIDO", "ENCERRADO"):
         return True
-    if v == "FORA":
+    if v in ("FORA", "JS"):
         return False
     try:
         data = datetime.strptime(ativo.strip(), "%d/%m/%Y")
@@ -152,17 +176,28 @@ def deve_pular(ativo):
     except Exception:
         return False
 
+def detectar_js(html, texto):
+    html_lower = html.lower()
+    for indicador in INDICADORES_JS:
+        if indicador in html_lower:
+            return True
+    if len(html) > 5000 and len(texto) < 200:
+        return True
+    return False
+
 def testar_site(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
-        return "OK" if r.status_code < 400 else "FORA"
+        if r.status_code < 400:
+            return "OK", r.text
+        return "FORA", ""
     except requests.exceptions.ConnectionError as e:
         msg = str(e)
         if any(x in msg for x in ["Name or service not known","Temporary failure","ERR_NAME_NOT_RESOLVED"]):
-            return "ENCERRADO"
-        return "FORA"
+            return "ENCERRADO", ""
+        return "FORA", ""
     except Exception:
-        return "FORA"
+        return "FORA", ""
 
 def normalizar_link(link):
     link = re.sub(r'\?utm_.*', '', link or "")
@@ -234,9 +269,44 @@ def get_config_dias(config):
 
 def eh_imovel(texto):
     t = texto.lower()
+
+    # Excluir bens móveis
     if any(p in t for p in PALAVRAS_NAO_IMOVEL):
         return False
-    return any(p in t for p in PALAVRAS_IMOVEL)
+
+    # Excluir terrenos claramente vazios
+    if any(p in t for p in PALAVRAS_TERRENO_VAZIO):
+        return False
+
+    # Verificar se tem palavra de imóvel
+    if not any(p in t for p in PALAVRAS_IMOVEL):
+        return False
+
+    # Se tem confirmação de construção, aceita
+    if any(p in t for p in PALAVRAS_CONSTRUCAO):
+        return True
+
+    # Se tem só "terreno" ou "lote" sem confirmação de construção,
+    # mantém por precaução (pode ser imóvel com terreno)
+    if "terreno" in t or "lote" in t or "sitio" in t or "sítio" in t or "chacara" in t or "chácara" in t:
+        return True
+
+    return True
+
+def buscar_lance_no_anuncio(link):
+    """Acessa a página do anúncio individual para buscar o valor do lance"""
+    try:
+        r = requests.get(link, headers=HEADERS, timeout=10)
+        if r.status_code >= 400:
+            return None, None
+        soup = BeautifulSoup(r.text, "html.parser")
+        texto = soup.get_text()
+        valores = re.findall(r'R\$\s*[\d\.,]+', texto)
+        lance     = extrair_valor(valores[0]) if len(valores) >= 1 else None
+        avaliacao = extrair_valor(valores[1]) if len(valores) >= 2 else None
+        return lance, avaliacao
+    except Exception:
+        return None, None
 
 def buscar_imoveis(url_site, estados, config):
     resultados = []
@@ -282,14 +352,31 @@ def buscar_imoveis(url_site, estados, config):
                     if not eh_imovel(texto_lower):
                         continue
 
+                    # Filtro de estado rigoroso
+                    # Verifica presença do estado E ausência de outros estados no mesmo card
                     tem_uf = (
                         estado_lower in texto_lower or
                         f" {uf.lower()} " in texto_lower or
                         f"/{uf.lower()}" in texto_lower or
                         f"- {uf.lower()}" in texto_lower or
-                        f"({uf.lower()})" in texto_lower
+                        f"({uf.lower()})" in texto_lower or
+                        f", {uf.lower()}" in texto_lower
                     )
                     if not tem_uf:
+                        continue
+
+                    # Se tem outro estado explicitamente mencionado, pula
+                    # Ex: card tem "Sumaré/SP" → rejeita mesmo que URL seja ?estado=PR
+                    outros_estados = [s for s in NOMES_ESTADOS.keys() if s != uf]
+                    tem_outro_estado = any(
+                        f"/{s.lower()}" in texto_lower or
+                        f"- {s.lower()}" in texto_lower or
+                        f"({s.lower()})" in texto_lower or
+                        f", {s.lower()}" in texto_lower or
+                        f" {s.lower()} " in texto_lower
+                        for s in outros_estados
+                    )
+                    if tem_outro_estado:
                         continue
 
                     if tipo_config == "JUDICIAL":
@@ -308,10 +395,16 @@ def buscar_imoveis(url_site, estados, config):
                     if not link_valido(link):
                         continue
 
+                    # Extrair valores da listagem
                     valores = re.findall(r'R\$\s*[\d\.,]+', texto)
                     lance     = extrair_valor(valores[0]) if len(valores) >= 1 else None
                     avaliacao = extrair_valor(valores[1]) if len(valores) >= 2 else None
 
+                    # Se não achou lance na listagem, busca no anúncio individual
+                    if lance is None:
+                        lance, avaliacao = buscar_lance_no_anuncio(link)
+
+                    # Filtrar por lance apenas se tiver valor
                     if lance and (lance < lance_min or lance > lance_max):
                         continue
 
@@ -357,30 +450,36 @@ def buscar_imoveis(url_site, estados, config):
     return resultados
 
 def processar_site(args):
-    """Processa um site — roda em paralelo"""
     i, row, estados, config, hoje_str = args
     nome  = str(row.get("Nome","")).strip()
     url   = str(row.get("URL","")).strip()
     ativo = str(row.get("Ativo","")).strip()
 
     if not url_valida(url):
-        return i, nome, "INVALIDO", []
+        return i, nome, "INVALIDO", [], False
 
     if deve_pular(ativo):
-        return i, nome, "PULAR", []
+        return i, nome, "PULAR", [], False
 
-    status = testar_site(url)
+    status, html = testar_site(url)
 
     if status == "ENCERRADO":
-        return i, nome, "ENCERRADO", []
+        return i, nome, "ENCERRADO", [], False
     elif status == "FORA":
-        return i, nome, "FORA", []
+        return i, nome, "FORA", [], False
+
+    soup = BeautifulSoup(html, "html.parser")
+    texto_visivel = soup.get_text()
+    eh_js = detectar_js(html, texto_visivel)
+
+    if eh_js:
+        return i, nome, "JS", [], True
 
     resultados = buscar_imoveis(url, estados, config)
     if resultados:
-        return i, nome, "SIM", resultados
+        return i, nome, "SIM", resultados, False
     else:
-        return i, nome, hoje_str, []
+        return i, nome, hoje_str, [], False
 
 def garantir_aba_resultados(sheet):
     try:
@@ -438,11 +537,10 @@ print(f"Processando '{ABA_LEILOEIROS}' — {len(leiloeiros)} leiloeiros com {WOR
 hoje_str         = datetime.today().strftime("%d/%m/%Y")
 total_encontrado = 0
 total_pulados    = 0
+total_js         = 0
 
-# Preparar argumentos para processamento paralelo
 args_list = [(i, row, estados, config, hoje_str) for i, row in enumerate(leiloeiros, start=2)]
 
-# Processar em lotes de WORKERS sites simultâneos
 batch_size = WORKERS
 for batch_start in range(0, len(args_list), batch_size):
     batch = args_list[batch_start:batch_start + batch_size]
@@ -452,7 +550,7 @@ for batch_start in range(0, len(args_list), batch_size):
 
         for future in as_completed(futures):
             try:
-                i, nome, status, resultados = future.result()
+                i, nome, status, resultados, precisa_js = future.result()
 
                 if status == "PULAR":
                     total_pulados += 1
@@ -460,12 +558,14 @@ for batch_start in range(0, len(args_list), batch_size):
 
                 print(f"[{i-1}/{len(leiloeiros)}] {nome} → {status}", flush=True)
 
-                # Atualizar coluna Ativo (thread-safe via lock)
                 with lock:
                     try:
-                        aba_leiloeiros.update_cell(i, 4, status if status != "SIM" or not resultados else "SIM")
+                        aba_leiloeiros.update_cell(i, 4, status)
                     except Exception:
                         pass
+
+                if precisa_js:
+                    total_js += 1
 
                 if resultados:
                     novos = []
@@ -483,5 +583,5 @@ for batch_start in range(0, len(args_list), batch_size):
             except Exception as e:
                 print(f"  Erro no future: {e}", flush=True)
 
-print(f"\nTotal: {total_encontrado} imoveis | Pulados: {total_pulados}", flush=True)
+print(f"\nTotal: {total_encontrado} imoveis | Pulados: {total_pulados} | JS: {total_js}", flush=True)
 print("Robo finalizado!", flush=True)
