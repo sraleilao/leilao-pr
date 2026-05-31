@@ -2,20 +2,38 @@ import os
 import json
 import re
 import time
+import random
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
-print("Iniciando Playwright...", flush=True)
+# Importar scrapers específicos
+try:
+    from scrapers_especificos import buscar_imoveis_especifico, get_config_site
+    SCRAPERS_ESPECIFICOS = True
+except ImportError:
+    SCRAPERS_ESPECIFICOS = False
+    def buscar_imoveis_especifico(page, url_site, estados, config):
+        return None
+
+print("Iniciando Playwright (modo humano)...", flush=True)
 
 SPREADSHEET_ID = "1NEZbf37cLnq9Asf9aA76cy4Wjtn7VTLaUQ85oE-ksr0"
 ABA_RESULTADOS = "Resultados"
 ABA_CONFIG     = "Configuracoes"
 
-# Bloco que este processo vai executar (1, 2 ou 3)
 PW_BLOCO = int(os.environ.get("PW_BLOCO", "1"))
 PW_TOTAL = int(os.environ.get("PW_TOTAL", "1"))
+
+# User agents reais de navegadores modernos
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+]
 
 PALAVRAS_IMOVEL = [
     "apartamento","casa ","terreno","sitio","sítio","chacara","chácara",
@@ -32,6 +50,12 @@ PALAVRAS_NAO_IMOVEL = [
     "semovente","animal","gado","cavalo","trator","reboque","trailer",
     "lancha","barco","aeronave","implemento agricola","celular","notebook",
     "televisao","televisão","geladeira","fogao","fogão"
+]
+
+PALAVRAS_TERRENO_VAZIO = [
+    "terreno vazio","lote vazio","área nua","area nua","lote nu","terreno nu",
+    "sem construção","sem construcao","sem edificação","sem edificacao",
+    "gleba","área rural nua","area rural nua","terreno baldio","lote baldio"
 ]
 
 PALAVRAS_LINK_IGNORAR = [
@@ -149,9 +173,102 @@ def eh_imovel(texto):
     t = texto.lower()
     if any(p in t for p in PALAVRAS_NAO_IMOVEL):
         return False
+    if any(p in t for p in PALAVRAS_TERRENO_VAZIO):
+        return False
     return any(p in t for p in PALAVRAS_IMOVEL)
 
+def simular_humano(page):
+    """Simula comportamento humano na página"""
+    try:
+        # Scroll suave
+        page.evaluate("window.scrollTo({top: 300, behavior: 'smooth'})")
+        time.sleep(random.uniform(0.5, 1.5))
+        page.evaluate("window.scrollTo({top: 0, behavior: 'smooth'})")
+        time.sleep(random.uniform(0.3, 0.8))
+    except Exception:
+        pass
+
+def criar_contexto_humano(playwright):
+    """Cria contexto de navegador que simula humano real"""
+    user_agent = random.choice(USER_AGENTS)
+
+    browser = playwright.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+    )
+
+    context = browser.new_context(
+        user_agent=user_agent,
+        viewport={"width": random.choice([1280, 1366, 1440, 1920]), "height": random.choice([720, 768, 800, 900])},
+        locale="pt-BR",
+        timezone_id="America/Sao_Paulo",
+        extra_http_headers={
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+        }
+    )
+
+    # Remover propriedades que identificam Playwright
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US'] });
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'permissions', {
+            get: () => ({ query: () => Promise.resolve({ state: 'granted' }) })
+        });
+    """)
+
+    return browser, context
+
+def acessar_com_retry(page, url, max_tentativas=3):
+    """Tenta acessar URL com retry e delays aleatórios"""
+    for tentativa in range(max_tentativas):
+        try:
+            page.goto(url, timeout=20000, wait_until="domcontentloaded")
+            # Delay humano
+            time.sleep(random.uniform(2, 4))
+            simular_humano(page)
+
+            # Verificar se foi bloqueado
+            conteudo = page.inner_text("body").lower()
+            if any(x in conteudo for x in ["403 forbidden","access denied","blocked","cloudflare","just a moment"]):
+                print(f"  Bloqueado (tentativa {tentativa+1})", flush=True)
+                time.sleep(random.uniform(3, 6))
+                continue
+
+            return True
+        except PlaywrightTimeout:
+            print(f"  Timeout (tentativa {tentativa+1})", flush=True)
+            time.sleep(random.uniform(2, 4))
+        except Exception as e:
+            if "ERR_NAME_NOT_RESOLVED" in str(e):
+                return None  # Site encerrado
+            time.sleep(random.uniform(1, 3))
+
+    return False
+
 def buscar_com_playwright(page, url_site, estados, config):
+    # Tenta scraper específico primeiro
+    if SCRAPERS_ESPECIFICOS:
+        resultado_especifico = buscar_imoveis_especifico(page, url_site, estados, config)
+        if resultado_especifico is not None:
+            return resultado_especifico
+
     resultados = []
     lance_min   = float(config.get("Lance Minimo", 0) or 0)
     lance_max   = float(config.get("Lance Maximo", 300000) or 300000)
@@ -168,8 +285,13 @@ def buscar_com_playwright(page, url_site, estados, config):
         for termo in termos:
             try:
                 url = url_site.rstrip("/") + termo
-                page.goto(url, timeout=15000, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
+
+                resultado_acesso = acessar_com_retry(page, url)
+
+                if resultado_acesso is None:
+                    return None  # Site encerrado
+                if resultado_acesso is False:
+                    continue     # Bloqueado ou timeout
 
                 texto_pagina = page.inner_text("body").lower()
 
@@ -178,8 +300,16 @@ def buscar_com_playwright(page, url_site, estados, config):
                 if not any(p in texto_pagina for p in PALAVRAS_IMOVEL):
                     continue
 
+                # Esperar carregamento dinâmico
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+
                 cards_texto = page.eval_on_selector_all(
-                    ".lote,.imovel,.card,.produto,.item,article,[class*='lote'],[class*='imovel'],[class*='card']",
+                    ".lote,.imovel,.card,.produto,.item,article,"
+                    "[class*='lote'],[class*='imovel'],[class*='card'],"
+                    "[class*='produto'],[class*='result'],[class*='oferta']",
                     "elements => elements.map(el => ({ texto: el.innerText || '', html: el.innerHTML || '' }))"
                 )
 
@@ -261,8 +391,9 @@ def buscar_com_playwright(page, url_site, estados, config):
                 if resultados:
                     break
 
-            except PlaywrightTimeout:
-                continue
+                # Delay entre termos para parecer humano
+                time.sleep(random.uniform(1, 2))
+
             except Exception as e:
                 if "ERR_NAME_NOT_RESOLVED" in str(e):
                     return None
@@ -305,9 +436,9 @@ except Exception:
     aba_resultados = sheet.add_worksheet(title=ABA_RESULTADOS, rows=10000, cols=8)
     aba_resultados.append_row(["Titulo","Estado","Lance Inicial (R$)","Avaliacao (R$)","Desagio (%)","Data Leilao","Link do Anuncio","Atualizado em"])
 
-# Coletar APENAS sites marcados como JS
+# Coletar sites JS e FORA das 3 abas
 abas_nomes = ["Leiloeiros1","Leiloeiros2","Leiloeiros3"]
-todos_js = []
+todos_sites = []
 
 for nome_aba in abas_nomes:
     try:
@@ -319,39 +450,36 @@ for nome_aba in abas_nomes:
             nome  = str(row.get("Nome","")).strip()
             if not url or not url.startswith("http"):
                 continue
-            if ativo.strip().upper() == "JS":
-                todos_js.append({
+            # Playwright processa JS e FORA
+            if ativo.strip().upper() in ("JS", "FORA"):
+                todos_sites.append({
                     "nome":  nome,
                     "url":   url,
                     "aba":   nome_aba,
-                    "linha": i
+                    "linha": i,
+                    "status": ativo.strip().upper()
                 })
     except Exception as e:
         print(f"Erro ao ler {nome_aba}: {e}", flush=True)
 
-# Dividir em blocos — este processo pega apenas seu bloco
-sites_bloco = [s for idx, s in enumerate(todos_js) if idx % PW_TOTAL == (PW_BLOCO - 1)]
-
-print(f"Total JS: {len(todos_js)} | Este bloco: {len(sites_bloco)}", flush=True)
+# Dividir em blocos paralelos
+sites_bloco = [s for idx, s in enumerate(todos_sites) if idx % PW_TOTAL == (PW_BLOCO - 1)]
+print(f"Total sites JS/FORA: {len(todos_sites)} | Este bloco: {len(sites_bloco)}", flush=True)
 
 if not sites_bloco:
-    print("Nenhum site JS neste bloco. Finalizado!", flush=True)
+    print("Nenhum site neste bloco. Finalizado!", flush=True)
     exit(0)
 
 hoje_str         = datetime.today().strftime("%d/%m/%Y")
 total_encontrado = 0
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-        viewport={"width": 1280, "height": 800}
-    )
+    browser, context = criar_contexto_humano(p)
     page = context.new_page()
-    page.set_default_timeout(15000)
+    page.set_default_timeout(20000)
 
     for idx, site in enumerate(sites_bloco, 1):
-        print(f"[{idx}/{len(sites_bloco)}] {site['nome']}", flush=True)
+        print(f"[{idx}/{len(sites_bloco)}] {site['nome']} ({site['status']})", flush=True)
 
         try:
             resultados = buscar_com_playwright(page, site["url"], estados, config)
@@ -360,6 +488,15 @@ with sync_playwright() as p:
                 print(f"  ENCERRADO (DNS)", flush=True)
                 aba = sheet.worksheet(site["aba"])
                 aba.update_cell(site["linha"], 4, "ENCERRADO")
+                continue
+
+            if resultados is False or resultados == []:
+                print(f"  Sem imoveis", flush=True)
+                # Sites JS: mantém status JS para ser verificado novamente
+                # Sites FORA: atualiza com data para não verificar tão cedo
+                if site["status"] == "FORA":
+                    aba = sheet.worksheet(site["aba"])
+                    aba.update_cell(site["linha"], 4, hoje_str)
                 continue
 
             novos = []
@@ -377,14 +514,18 @@ with sync_playwright() as p:
                     gravar_linha(aba_resultados, r)
                 total_encontrado += len(novos)
             else:
-                print(f"  Sem imoveis", flush=True)
-                aba = sheet.worksheet(site["aba"])
-                aba.update_cell(site["linha"], 4, hoje_str)
+                print(f"  Sem imoveis novos", flush=True)
+                # Sites JS: mantém JS para ser verificado novamente
+                # Sites FORA: atualiza com data
+                if site["status"] == "FORA":
+                    aba = sheet.worksheet(site["aba"])
+                    aba.update_cell(site["linha"], 4, hoje_str)
 
         except Exception as e:
             print(f"  Erro: {e}", flush=True)
 
-        time.sleep(1)
+        # Delay humano entre sites
+        time.sleep(random.uniform(2, 4))
 
     context.close()
     browser.close()
